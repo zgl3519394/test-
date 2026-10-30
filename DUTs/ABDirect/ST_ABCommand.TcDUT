@@ -1,0 +1,18 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <DUT Name="ST_ABCommand" Id="{9060dd25-188d-4450-92e8-fdb2d7673815}">
+    <Declaration><![CDATA[TYPE ST_ABCommand :
+STRUCT
+    bPower : BOOL := FALSE;
+    bAuto : BOOL := FALSE;
+    bMove : BOOL := FALSE; // Consumed by the 1ms task.
+    bStop : BOOL := FALSE; // Controlled stop; cancels Auto.
+    bReset : BOOL := FALSE; // Joint safety/core reset; Power OFF and emergency conditions cleared.
+    bEmergencyStop : BOOL := FALSE; // Level-sensitive software emergency; explicit release required.
+    fTarget : LREAL := 720000.0;
+    nMoverId : UINT := 1; // Upper-layer identity only. NEVER placed into a PDO.
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

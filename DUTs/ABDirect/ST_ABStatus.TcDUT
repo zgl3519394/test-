@@ -1,0 +1,37 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <DUT Name="ST_ABStatus" Id="{7887f93d-eea5-48a8-ac98-309998250f2a}">
+    <Declaration><![CDATA[TYPE ST_ABStatus :
+STRUCT
+    bConfigured : BOOL;
+    bResetRejected : BOOL; // Reset while Power is ON is rejected, not queued.
+    bFault : BOOL;
+    bPowered : BOOL;
+    bReady : BOOL;
+    bBusy : BOOL;
+    bAtA : BOOL;
+    bAtB : BOOL;
+    bFeedbackValidA : BOOL;
+    bFeedbackValidB : BOOL;
+    bParticipatingA : BOOL;
+    bParticipatingB : BOOL;
+    nMoverId : UINT;
+    nActiveMoverCount : UINT;
+    nOwner : UINT; // 0=none, 1=A, 2=B, 3=both.
+    nErrorId : UDINT;
+    nInhibitCode : UDINT; // 1=protocol/config, 2=interlock, 3=feedback, 4=power off.
+    fEdgeA : LREAL;
+    fEdgeB : LREAL;
+    fLocalCenterA : LREAL;
+    fLocalCenterB : LREAL;
+    fActualPosition : LREAL;
+    fActualVelocity : LREAL;
+    fCommandPosition : LREAL;
+    fCommandVelocity : LREAL;
+    dwStatusA : DWORD;
+    dwStatusB : DWORD;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

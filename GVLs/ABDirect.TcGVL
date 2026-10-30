@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <GVL Name="ABDirect" Id="{197403cd-c909-4e80-bbc0-6061093ad27a}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+VAR_GLOBAL
+    stConfig : ST_ABConfig;
+    stCommand : ST_ABCommand;
+    stStatus : ST_ABStatus;
+    bStartupReady : BOOL;
+    nStateA AT %I* : UINT;
+    nStateB AT %I* : UINT;
+    aTxA AT %I* : ARRAY[1..10] OF DWORD;
+    aTxB AT %I* : ARRAY[1..10] OF DWORD;
+    aRxA AT %Q* : ARRAY[1..10] OF DWORD;
+    aRxB AT %Q* : ARRAY[1..10] OF DWORD;
+END_VAR
+]]></Declaration>
+  </GVL>
+</TcPlcObject>

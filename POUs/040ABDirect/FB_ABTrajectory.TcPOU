@@ -1,0 +1,217 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <POU Name="FB_ABTrajectory" Id="{64b7fbb9-faae-444c-8214-10c5a9a77771}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_ABTrajectory
+(* Analytic rest-to-rest setpoint generator. Units: um, um/s, um/s^2, s.
+   bExecute is edge-triggered and ignored while busy or stopping.
+   Parameters except cycle time are latched at accepted execute.
+   bStop brakes from the previously emitted position and velocity.
+   bReset is an abort/reseed, NOT a controlled stop; call only when permitted.
+   Caller owns physical limits, feedback, enable and cross-module handover.
+   Before executing, caller must provide a continuous fStartPosition.
+   bDone/bStopped latch until next accepted command or reset. Errors latch.
+   Error IDs: 1 invalid cycle, 2 invalid position, 3 invalid motion limits,
+   4 insufficient floating-point time resolution for the requested profile. *)
+VAR_INPUT
+    bExecute : BOOL;
+    bStop : BOOL;
+    bReset : BOOL;
+    fStartPosition : LREAL;
+    fTargetPosition : LREAL;
+    fMaxVelocity : LREAL := 100000.0;
+    fAcceleration : LREAL := 500000.0;
+    fDeceleration : LREAL := 500000.0;
+    fCycleTime : LREAL := 0.001;
+END_VAR
+VAR_OUTPUT
+    fPosition : LREAL;
+    fVelocity : LREAL;
+    bBusy : BOOL;
+    bDone : BOOL;
+    bStopped : BOOL;
+    bError : BOOL;
+    nErrorId : UDINT;
+END_VAR
+VAR
+    bExecuteOld : BOOL;
+    bExecuteRise : BOOL;
+    bBraking : BOOL;
+    fOrigin : LREAL;
+    fDestination : LREAL;
+    fDirection : LREAL := 1.0;
+    fDistance : LREAL;
+    fAccel : LREAL;
+    fDecel : LREAL;
+    fPeak : LREAL;
+    fAccelTime : LREAL;
+    fCruiseTime : LREAL;
+    fDecelTime : LREAL;
+    fTotalTime : LREAL;
+    fAccelDistance : LREAL;
+    fCruiseDistance : LREAL;
+    fElapsed : LREAL;
+    fPhaseTime : LREAL;
+    fTravel : LREAL;
+    fStopOrigin : LREAL;
+    fStopVelocity : LREAL;
+    fStopDirection : LREAL;
+    fStopTime : LREAL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[bExecuteRise := bExecute AND NOT bExecuteOld;
+bExecuteOld := bExecute;
+
+IF bReset THEN
+    bBusy := FALSE;
+    bDone := FALSE;
+    bStopped := FALSE;
+    bBraking := FALSE;
+    fVelocity := 0.0;
+    fElapsed := 0.0;
+    bError := FALSE;
+    nErrorId := 0;
+    IF ABS(fStartPosition) <= 1000000000.0 THEN
+        fPosition := fStartPosition;
+    ELSE
+        bError := TRUE;
+        nErrorId := 2;
+    END_IF;
+    RETURN;
+END_IF;
+
+(* Negated valid-range checks reject NaN and infinity as well as bad ranges. *)
+IF NOT ((fCycleTime >= 0.000001) AND (fCycleTime <= 0.1)) THEN
+    bError := TRUE;
+    nErrorId := 1;
+END_IF;
+IF bError THEN
+    bBusy := FALSE;
+    bDone := FALSE;
+    bStopped := FALSE;
+    bBraking := FALSE;
+    fVelocity := 0.0;
+    RETURN;
+END_IF;
+
+IF bStop THEN
+    bDone := FALSE;
+    IF bBusy AND NOT bBraking THEN
+        fStopOrigin := fPosition;
+        fStopVelocity := ABS(fVelocity);
+        fStopDirection := 1.0;
+        IF fVelocity < 0.0 THEN
+            fStopDirection := -1.0;
+        END_IF;
+        fStopTime := fStopVelocity / fDecel;
+        fElapsed := 0.0;
+        bBraking := TRUE;
+    ELSIF NOT bBusy THEN
+        bStopped := TRUE;
+        fVelocity := 0.0;
+    END_IF;
+ELSIF bExecuteRise AND NOT bBusy THEN
+    bDone := FALSE;
+    bStopped := FALSE;
+    IF NOT ((ABS(fStartPosition) <= 1000000000.0) AND (ABS(fTargetPosition) <= 1000000000.0)) THEN
+        bError := TRUE;
+        nErrorId := 2;
+        RETURN;
+    END_IF;
+    IF NOT ((fMaxVelocity >= 0.001) AND (fMaxVelocity <= 1000000000.0) AND (fAcceleration >= 0.001) AND (fAcceleration <= 1000000000000.0) AND (fDeceleration >= 0.001) AND (fDeceleration <= 1000000000000.0)) THEN
+        bError := TRUE;
+        nErrorId := 3;
+        RETURN;
+    END_IF;
+
+    fOrigin := fStartPosition;
+    fDestination := fTargetPosition;
+    fDistance := ABS(fDestination - fOrigin);
+    fDirection := 1.0;
+    IF fDestination < fOrigin THEN
+        fDirection := -1.0;
+    END_IF;
+    fPosition := fOrigin;
+    fVelocity := 0.0;
+    fAccel := fAcceleration;
+    fDecel := fDeceleration;
+    fElapsed := 0.0;
+    bBraking := FALSE;
+
+    IF fDistance <= 0.000001 THEN
+        fPosition := fDestination;
+        bBusy := FALSE;
+        bDone := TRUE;
+    ELSE
+        fPeak := MIN(fMaxVelocity, SQRT(2.0 * fDistance / (1.0 / fAccel + 1.0 / fDecel)));
+        fAccelTime := fPeak / fAccel;
+        fDecelTime := fPeak / fDecel;
+        fAccelDistance := 0.5 * fPeak * fAccelTime;
+        fCruiseDistance := MAX(0.0, fDistance - fAccelDistance - 0.5 * fPeak * fDecelTime);
+        fCruiseTime := fCruiseDistance / fPeak;
+        fTotalTime := fAccelTime + fCruiseTime + fDecelTime;
+        IF NOT ((fTotalTime + fCycleTime) > fTotalTime) THEN
+            bError := TRUE;
+            nErrorId := 4;
+            RETURN;
+        END_IF;
+        bBusy := TRUE;
+    END_IF;
+END_IF;
+
+IF NOT bBusy THEN
+    RETURN;
+END_IF;
+
+(* Also protects a running trajectory if the caller changes cycle time. *)
+IF NOT ((fElapsed + fCycleTime) > fElapsed) THEN
+    bError := TRUE;
+    nErrorId := 4;
+    bBusy := FALSE;
+    bDone := FALSE;
+    bStopped := FALSE;
+    bBraking := FALSE;
+    fVelocity := 0.0;
+    RETURN;
+END_IF;
+
+IF bBraking THEN
+    fElapsed := MIN(fElapsed + fCycleTime, fStopTime);
+    fPosition := fStopOrigin + fStopDirection * (fStopVelocity * fElapsed - 0.5 * fDecel * fElapsed * fElapsed);
+    fVelocity := fStopDirection * MAX(0.0, fStopVelocity - fDecel * fElapsed);
+    IF fElapsed >= fStopTime THEN
+        fVelocity := 0.0;
+        bBusy := FALSE;
+        bStopped := TRUE;
+        bBraking := FALSE;
+    END_IF;
+ELSE
+    fElapsed := MIN(fElapsed + fCycleTime, fTotalTime);
+    IF fElapsed >= fTotalTime THEN
+        (* Analytic endpoint reached; only round-off remains to clamp. *)
+        fPosition := fDestination;
+        fVelocity := 0.0;
+        bBusy := FALSE;
+        bDone := TRUE;
+    ELSIF fElapsed < fAccelTime THEN
+        fTravel := 0.5 * fAccel * fElapsed * fElapsed;
+        fPosition := fOrigin + fDirection * fTravel;
+        fVelocity := fDirection * fAccel * fElapsed;
+    ELSIF fElapsed < (fAccelTime + fCruiseTime) THEN
+        fPhaseTime := fElapsed - fAccelTime;
+        fTravel := fAccelDistance + fPeak * fPhaseTime;
+        fPosition := fOrigin + fDirection * fTravel;
+        fVelocity := fDirection * fPeak;
+    ELSE
+        fPhaseTime := fElapsed - fAccelTime - fCruiseTime;
+        fTravel := fAccelDistance + fCruiseDistance + fPeak * fPhaseTime - 0.5 * fDecel * fPhaseTime * fPhaseTime;
+        fPosition := fOrigin + fDirection * fTravel;
+        fVelocity := fDirection * MAX(0.0, fPeak - fDecel * fPhaseTime);
+    END_IF;
+END_IF;]]></ST>
+    </Implementation>
+    <LineIds Name="FB_ABTrajectory">
+      <LineId Id="3" Count="148" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

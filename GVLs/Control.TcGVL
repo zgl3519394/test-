@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <GVL Name="Control" Id="{cfe8c668-152b-4307-a179-96115c4ebd9d}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+VAR_GLOBAL
+    // Reserved physical I/O interface. No hardware links are configured yet.
+    // DI[2]: TRUE = emergency-stop circuit healthy; DO[0]: main power relay.
+    HwDoSign : ARRAY[0..7] OF BOOL;
+    HwDiSign : ARRAY[0..7] OF BOOL;
+END_VAR
+]]></Declaration>
+  </GVL>
+</TcPlcObject>

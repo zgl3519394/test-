@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <GVL Name="Config" Id="{a7f3d0b1-8542-4197-8f4a-d81bdb596a28}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+VAR_GLOBAL CONSTANT
+    // Physical I/O interface is reserved; enable only after actual I/O mapping.
+    ACTIVE_EXIO : BOOL := FALSE;
+END_VAR]]></Declaration>
+  </GVL>
+</TcPlcObject>

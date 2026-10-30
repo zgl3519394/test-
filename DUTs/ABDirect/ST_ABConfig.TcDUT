@@ -1,0 +1,24 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <DUT Name="ST_ABConfig" Id="{6aeafeb6-23ae-4dd4-bb36-240b3d41f307}">
+    <Declaration><![CDATA[TYPE ST_ABConfig :
+STRUCT
+    stA : ST_ABProtocol;
+    stB : ST_ABProtocol;
+    fCycleTime : LREAL := 0.001;
+    fStationA : LREAL := 240000.0;
+    fStationB : LREAL := 720000.0;
+    fVelocity : LREAL := 100000.0;
+    fAcceleration : LREAL := 1000000.0;
+    fDeceleration : LREAL := 1000000.0;
+    fPositionTolerance : LREAL := 1000.0;
+    fCompareTolerance : LREAL := 1500.0;
+    fFollowingLimit : LREAL := 10000.0;
+    nFollowingCycles : UDINT := 20;
+    nSettleCycles : UDINT := 50;
+    nDwellCycles : UDINT := 2000;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

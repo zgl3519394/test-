@@ -1,0 +1,87 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <POU Name="ABControl" Id="{e16e2499-f156-4412-bff2-91854b9bf2db}" SpecialFunc="None">
+    <Declaration><![CDATA[PROGRAM ABControl
+VAR
+    fbDirect : FB_ABDirect;
+    fbStartup : TON;
+    fbHardwareCutDelay : TON;
+    bHardwareHealthy : BOOL;
+    bHardwareLatched : BOOL;
+    bHardwareResetReady : BOOL;
+    bSoftEmergency : BOOL;
+    bResetRequest : BOOL;
+    bPowerRequest : BOOL;
+    bResetAccepted : BOOL;
+    bResetRejected : BOOL; // Result of the last reset request, retained until the next request.
+    bPermit : BOOL;
+    bEstop : BOOL;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// Single 1 ms owner of startup, safety, command consumption and Drive 3/4 PDOs.
+// Both modules are manually aligned and mechanically fixed before use.
+// Snapshot the public reset and power request before safety can clear Power.
+bResetRequest := ABDirect.stCommand.bReset;
+bPowerRequest := ABDirect.stCommand.bPower;
+fbStartup(IN := TRUE, PT := T#10S);
+ABDirect.bStartupReady := fbStartup.Q;
+
+// The hardware emergency input is healthy HIGH. Once tripped, input recovery
+// alone cannot release the latch or restore the motion permit.
+bHardwareHealthy := NOT Config.ACTIVE_EXIO OR Control.HwDiSign[2];
+IF NOT bHardwareHealthy THEN bHardwareLatched := TRUE; END_IF
+fbHardwareCutDelay(IN := bHardwareLatched, PT := T#5S);
+bHardwareResetReady := bHardwareHealthy
+    AND (NOT bHardwareLatched OR fbHardwareCutDelay.Q);
+bSoftEmergency := ABDirect.stCommand.bEmergencyStop;
+
+// A rejected reset is consumed now, never queued for automatic release later.
+// The accepted request reaches fbDirect in this same task, after safety reset.
+bResetAccepted := FALSE;
+IF bResetRequest THEN
+    bResetAccepted := NOT bPowerRequest AND NOT bSoftEmergency AND bHardwareResetReady;
+    bResetRejected := NOT bResetAccepted;
+    IF bResetAccepted THEN
+        bHardwareLatched := FALSE;
+        // Reset the timer now so even an immediate new trip receives its own delay.
+        fbHardwareCutDelay(IN := FALSE, PT := T#5S);
+    END_IF
+END_IF
+ABDirect.stCommand.bReset := bResetAccepted;
+
+bEstop := bSoftEmergency OR bHardwareLatched;
+IF bEstop THEN
+    ABDirect.stCommand.bPower := FALSE;
+    ABDirect.stCommand.bAuto := FALSE;
+    ABDirect.stCommand.bMove := FALSE;
+END_IF
+
+// Never energize the relay during startup or a still-latched emergency.
+// During the 5 s cut-off delay, retain its prior state; do not turn it on.
+IF NOT fbStartup.Q THEN
+    Control.HwDoSign[0] := FALSE;
+ELSIF NOT bHardwareLatched THEN
+    Control.HwDoSign[0] := TRUE;
+ELSIF fbHardwareCutDelay.Q THEN
+    Control.HwDoSign[0] := FALSE;
+END_IF
+bPermit := fbStartup.Q AND NOT bEstop;
+
+fbDirect(stConfig := ABDirect.stConfig, stCommand := ABDirect.stCommand,
+    nStateA := ABDirect.nStateA, nStateB := ABDirect.nStateB,
+    aTxA := ABDirect.aTxA, aTxB := ABDirect.aTxB,
+    bPermit := bPermit, bEmergency := bEstop);
+ABDirect.aRxA := fbDirect.aRxA;
+ABDirect.aRxB := fbDirect.aRxB;
+ABDirect.stStatus := fbDirect.stStatus;
+// Include hardware/soft-emergency rejection, not only the core's Power check.
+ABDirect.stStatus.bResetRejected := bResetRejected;
+]]></ST>
+    </Implementation>
+    <LineIds Name="ABControl">
+      <LineId Id="3" Count="57" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

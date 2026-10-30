@@ -1,0 +1,324 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <POU Name="FB_ABDirect" Id="{db13e23c-d692-4f06-9c10-a024e39ee109}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_ABDirect
+VAR_INPUT
+    stConfig : ST_ABConfig;
+    aTxA : ARRAY[1..10] OF DWORD;
+    aTxB : ARRAY[1..10] OF DWORD;
+    nStateA : UINT;
+    nStateB : UINT;
+    bPermit : BOOL;
+    bEmergency : BOOL;
+END_VAR
+VAR_IN_OUT
+    stCommand : ST_ABCommand;
+END_VAR
+VAR_OUTPUT
+    aRxA : ARRAY[1..10] OF DWORD;
+    aRxB : ARRAY[1..10] OF DWORD;
+    stStatus : ST_ABStatus;
+END_VAR
+VAR
+    fbTrajectory : FB_ABTrajectory;
+    i : UINT;
+    nIndexA : UINT;
+    nIndexB : UINT;
+    dwA : DWORD;
+    dwB : DWORD;
+    bConfigOK : BOOL;
+    bPairOK : BOOL;
+    bFeedback : BOOL;
+    bLastFeedback : BOOL;
+    bInitialized : BOOL;
+    bExecute : BOOL;
+    bStop : BOOL;
+    bResetTrajectory : BOOL;
+    bUseA : BOOL;
+    bUseB : BOOL;
+    fGlobalA : LREAL;
+    fGlobalB : LREAL;
+    fLastActual : LREAL;
+    fTarget : LREAL;
+    fSeed : LREAL;
+    fPredictedStop : LREAL;
+    fLookAheadVelocity : LREAL;
+    fLocalB : LREAL;
+    nFollowing : UDINT;
+    nSettled : UDINT;
+    nDwell : UDINT;
+    nPendingFault : UDINT;
+    stLatchedConfig : ST_ABConfig;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// All lengths: um. This FB owns one logical mover; no business ID is sent.
+// Clear outputs first so every exit is nonnegative and inactive.
+FOR i := 1 TO 10 DO
+    aRxA[i] := 0;
+    aRxB[i] := 0;
+END_FOR
+stStatus.bParticipatingA := FALSE;
+stStatus.bParticipatingB := FALSE;
+stStatus.bPowered := FALSE;
+stStatus.bReady := FALSE;
+stStatus.bAtA := FALSE;
+stStatus.bAtB := FALSE;
+stStatus.nInhibitCode := 0;
+
+// Never use an unvalidated slot as an array subscript.
+nIndexA := LIMIT(3, stConfig.stA.nPositionIndex, 8);
+nIndexB := LIMIT(3, stConfig.stB.nPositionIndex, 8);
+dwA := aTxA[nIndexA];
+dwB := aTxB[nIndexB];
+stStatus.dwStatusA := dwA AND DWORD#16#F;
+stStatus.dwStatusB := dwB AND DWORD#16#F;
+stStatus.fEdgeA := UDINT_TO_LREAL(DWORD_TO_UDINT(SHR(dwA, 4)));
+stStatus.fEdgeB := UDINT_TO_LREAL(DWORD_TO_UDINT(SHR(dwB, 4)));
+stStatus.fLocalCenterA := stStatus.fEdgeA - 80000.0;
+stStatus.fLocalCenterB := stStatus.fEdgeB - 80000.0;
+fGlobalA := stStatus.fLocalCenterA;
+fGlobalB := 480000.0 + stStatus.fLocalCenterB;
+
+bConfigOK := stConfig.stA.bConfirmed AND stConfig.stB.bConfirmed
+    AND (stConfig.stA.nPositionIndex = nIndexA) AND (stConfig.stB.nPositionIndex = nIndexB)
+    AND (stConfig.stA.dwPresentMask <> 0) AND (stConfig.stB.dwPresentMask <> 0)
+    AND ((stConfig.stA.dwPresentMask AND DWORD#16#FFFFFFF0) = 0)
+    AND ((stConfig.stB.dwPresentMask AND DWORD#16#FFFFFFF0) = 0)
+    AND ((stConfig.stA.dwPresentValue AND NOT stConfig.stA.dwPresentMask) = 0)
+    AND ((stConfig.stB.dwPresentValue AND NOT stConfig.stB.dwPresentMask) = 0)
+    AND ((stConfig.stA.dwFaultMask AND DWORD#16#FFFFFFF0) = 0)
+    AND ((stConfig.stB.dwFaultMask AND DWORD#16#FFFFFFF0) = 0)
+    AND (stConfig.stA.dwFaultMask <> 0) AND (stConfig.stB.dwFaultMask <> 0)
+    AND (stConfig.stA.dwActiveControl = 1) AND (stConfig.stB.dwActiveControl = 1)
+    AND (stConfig.stA.dwInactiveControl = 0) AND (stConfig.stB.dwInactiveControl = 0)
+    AND (stConfig.fCycleTime = 0.001)
+    AND (stConfig.fStationA >= 0.0) AND (stConfig.fStationA < 400000.0)
+    AND (stConfig.fStationB > 560000.0) AND (stConfig.fStationB <= 960000.0)
+    AND (stConfig.fVelocity > 0.0) AND (stConfig.fVelocity <= 1000000.0)
+    AND (stConfig.fAcceleration > 0.0) AND (stConfig.fAcceleration <= 100000000.0)
+    AND (stConfig.fDeceleration > 0.0) AND (stConfig.fDeceleration <= 100000000.0)
+    AND (stConfig.fPositionTolerance > 0.0) AND (stConfig.fPositionTolerance <= 5000.0)
+    AND (stConfig.fCompareTolerance > 0.0) AND (stConfig.fCompareTolerance <= 5000.0)
+    AND (stConfig.fFollowingLimit > 0.0) AND (stConfig.fFollowingLimit <= 20000.0)
+    AND (stConfig.nFollowingCycles > 0) AND (stConfig.nFollowingCycles <= 1000)
+    AND (stConfig.nSettleCycles > 0) AND (stConfig.nSettleCycles <= 10000)
+    AND (stConfig.nDwellCycles <= 600000);
+stStatus.bConfigured := bConfigOK;
+stStatus.bFeedbackValidA := bConfigOK AND (nStateA = 8)
+    AND ((dwA AND stConfig.stA.dwPresentMask) = stConfig.stA.dwPresentValue)
+    AND ((dwA AND stConfig.stA.dwFaultMask) = 0)
+    AND (stStatus.fEdgeA > 0.0) AND (stStatus.fEdgeA < 640000.0);
+stStatus.bFeedbackValidB := bConfigOK AND (nStateB = 8)
+    AND ((dwB AND stConfig.stB.dwPresentMask) = stConfig.stB.dwPresentValue)
+    AND ((dwB AND stConfig.stB.dwFaultMask) = 0)
+    AND (stStatus.fEdgeB > 0.0) AND (stStatus.fEdgeB < 640000.0);
+bPairOK := NOT (stStatus.bFeedbackValidA AND stStatus.bFeedbackValidB)
+    OR (ABS(fGlobalA - fGlobalB) <= stConfig.fCompareTolerance);
+bFeedback := (stStatus.bFeedbackValidA OR stStatus.bFeedbackValidB) AND bPairOK;
+IF bFeedback THEN
+    // Prefer the current owner's feedback. Never average unrelated local coordinates.
+    IF stStatus.bFeedbackValidB AND ((stStatus.nOwner = 2) OR NOT stStatus.bFeedbackValidA) THEN
+        stStatus.fActualPosition := fGlobalB;
+    ELSE
+        stStatus.fActualPosition := fGlobalA;
+    END_IF
+    IF bLastFeedback THEN
+        stStatus.fActualVelocity := 0.9 * stStatus.fActualVelocity
+            + 0.1 * (stStatus.fActualPosition - fLastActual) / 0.001;
+    ELSE
+        stStatus.fActualVelocity := 0.0;
+    END_IF
+    fLastActual := stStatus.fActualPosition;
+END_IF
+bLastFeedback := bFeedback;
+stStatus.nActiveMoverCount := 0;
+IF bFeedback THEN stStatus.nActiveMoverCount := 1; END_IF
+
+// Reset never invents a drive fault-reset bit. Hardware faults must first be cleared
+// using the firmware's existing mechanism. Re-arm only with Power off.
+IF stCommand.bReset THEN
+    stStatus.bResetRejected := stCommand.bPower;
+END_IF
+IF stCommand.bReset AND NOT stCommand.bPower THEN
+    stStatus.nErrorId := 0;
+    nPendingFault := 0;
+    bInitialized := FALSE;
+    stCommand.bAuto := FALSE;
+END_IF
+stCommand.bReset := FALSE;
+IF bInitialized AND bEmergency THEN stStatus.nErrorId := 1001; END_IF
+IF bInitialized AND NOT bConfigOK THEN stStatus.nErrorId := 1002; END_IF
+IF bInitialized AND (MEMCMP(ADR(stConfig), ADR(stLatchedConfig), SIZEOF(stConfig)) <> 0) THEN stStatus.nErrorId := 1006; END_IF
+IF bInitialized AND NOT bPairOK THEN stStatus.nErrorId := 1003; END_IF
+IF bInitialized AND NOT bPermit THEN stStatus.nErrorId := 1004; END_IF
+IF bInitialized AND (stCommand.nMoverId <> stStatus.nMoverId) THEN stStatus.nErrorId := 1005; END_IF
+stStatus.bFault := stStatus.nErrorId <> 0;
+
+IF NOT bConfigOK THEN
+    stStatus.nInhibitCode := 1;
+    // Do not retain an arming request while the firmware contract is unconfirmed.
+    stCommand.bPower := FALSE; stCommand.bAuto := FALSE;
+ELSIF NOT bPermit OR bEmergency THEN stStatus.nInhibitCode := 2;
+ELSIF NOT bFeedback THEN stStatus.nInhibitCode := 3;
+ELSIF NOT stCommand.bPower THEN stStatus.nInhibitCode := 4;
+END_IF
+// Power off cancels automatic operation. Re-enable requires a new Auto command.
+IF NOT stCommand.bPower THEN stCommand.bAuto := FALSE; END_IF
+IF NOT bConfigOK OR NOT bPermit OR bEmergency OR stStatus.bFault OR NOT stCommand.bPower THEN
+    bInitialized := FALSE;
+    stStatus.nOwner := 0;
+    stStatus.bBusy := FALSE;
+    nDwell := 0; nSettled := 0; nFollowing := 0; nPendingFault := 0;
+    stCommand.bMove := FALSE; stCommand.bStop := FALSE;
+    IF stStatus.bFault THEN stCommand.bPower := FALSE; stCommand.bAuto := FALSE; END_IF
+    IF bFeedback THEN stStatus.fCommandPosition := stStatus.fActualPosition; END_IF
+    stStatus.fCommandVelocity := 0.0;
+    fbTrajectory(bReset := TRUE, bExecute := FALSE, bStop := FALSE,
+        fStartPosition := stStatus.fCommandPosition, fCycleTime := 0.001);
+    RETURN;
+END_IF
+
+bExecute := FALSE; bStop := FALSE; bResetTrajectory := FALSE;
+IF NOT bInitialized THEN
+    IF NOT bFeedback OR (stStatus.fActualPosition < 0.0) OR (stStatus.fActualPosition > 960000.0)
+        OR (stCommand.nMoverId = 0) THEN RETURN; END_IF
+    stStatus.nMoverId := stCommand.nMoverId;
+    stLatchedConfig := stConfig;
+    stStatus.fCommandPosition := stStatus.fActualPosition;
+    fTarget := stStatus.fCommandPosition;
+    stStatus.nOwner := 0;
+    IF stStatus.bFeedbackValidA AND (stStatus.fActualPosition < 550000.0) THEN stStatus.nOwner := 1; END_IF
+    IF stStatus.bFeedbackValidB AND (stStatus.fActualPosition >= 480000.0) THEN
+        IF stStatus.nOwner = 1 THEN stStatus.nOwner := 3; ELSE stStatus.nOwner := 2; END_IF
+    END_IF
+    IF stStatus.nOwner = 0 THEN RETURN; END_IF
+    bInitialized := TRUE;
+    bResetTrajectory := TRUE;
+    nDwell := 0; nSettled := 0;
+    stCommand.bMove := FALSE; // Re-arm from actual position before accepting motion.
+END_IF
+fSeed := stStatus.fCommandPosition;
+
+bStop := stCommand.bStop OR (nPendingFault <> 0);
+IF bStop THEN stCommand.bAuto := FALSE; nDwell := 0; END_IF
+stCommand.bStop := FALSE;
+
+IF NOT fbTrajectory.bBusy AND NOT bResetTrajectory AND NOT bStop THEN
+    IF ABS(stStatus.fActualPosition - fSeed) <= stConfig.fPositionTolerance
+        AND ABS(stStatus.fActualVelocity) <= 5000.0 THEN
+        nSettled := MIN(nSettled + 1, stConfig.nSettleCycles);
+    ELSE nSettled := 0; nDwell := 0;
+    END_IF
+    IF stCommand.bMove THEN
+        fTarget := stCommand.fTarget;
+        bExecute := TRUE;
+    ELSIF stCommand.bAuto AND (nSettled >= stConfig.nSettleCycles) THEN
+        nDwell := MIN(nDwell + 1, stConfig.nDwellCycles + 1);
+        IF nDwell > stConfig.nDwellCycles THEN
+            IF ABS(fSeed - stConfig.fStationA) <= stConfig.fPositionTolerance THEN
+                fTarget := stConfig.fStationB;
+            ELSE fTarget := stConfig.fStationA;
+            END_IF
+            bExecute := TRUE;
+        END_IF
+    ELSE nDwell := 0;
+    END_IF
+ELSE nSettled := 0; nDwell := 0;
+END_IF
+stCommand.bMove := FALSE;
+IF bExecute THEN
+    nDwell := 0; nSettled := 0;
+    IF NOT ((fTarget >= 0.0) AND (fTarget <= 960000.0)) THEN
+        stStatus.nErrorId := 2003;
+        bExecute := FALSE;
+    END_IF
+END_IF
+// Bound NEXT scan's speed as well as distance. Checking only current speed can
+// miss the braking boundary while accelerating. Apply this to the first Execute
+// scan too; an infeasible request must not move away from rest.
+IF (fbTrajectory.bBusy OR bExecute) AND NOT bResetTrajectory THEN
+    fLookAheadVelocity := MIN(stConfig.fVelocity,
+        ABS(stStatus.fCommandVelocity) + stConfig.fAcceleration * 0.001);
+    fPredictedStop := fLookAheadVelocity * 0.001
+        + fLookAheadVelocity * fLookAheadVelocity / (2.0 * stConfig.fDeceleration);
+    IF (stStatus.nOwner = 1) AND NOT stStatus.bFeedbackValidB
+        AND ((stStatus.fCommandVelocity > 0.0) OR (bExecute AND (fTarget > fSeed)))
+        AND ((fSeed + fPredictedStop) >= 510000.0) THEN nPendingFault := 2001; END_IF
+    IF (stStatus.nOwner = 2) AND NOT stStatus.bFeedbackValidA
+        AND ((stStatus.fCommandVelocity < 0.0) OR (bExecute AND (fTarget < fSeed)))
+        AND ((fSeed - fPredictedStop) <= 520000.0) THEN nPendingFault := 2002; END_IF
+    IF nPendingFault <> 0 THEN
+        bStop := TRUE; bExecute := FALSE; stCommand.bAuto := FALSE;
+    END_IF
+END_IF
+fbTrajectory(bReset := bResetTrajectory, bExecute := bExecute, bStop := bStop,
+    fStartPosition := fSeed, fTargetPosition := fTarget,
+    fMaxVelocity := stConfig.fVelocity, fAcceleration := stConfig.fAcceleration,
+    fDeceleration := stConfig.fDeceleration, fCycleTime := 0.001);
+stStatus.fCommandPosition := fbTrajectory.fPosition;
+stStatus.fCommandVelocity := fbTrajectory.fVelocity;
+stStatus.bBusy := fbTrajectory.bBusy;
+IF fbTrajectory.bError THEN stStatus.nErrorId := 2004; END_IF
+IF (nPendingFault <> 0) AND NOT fbTrajectory.bBusy THEN stStatus.nErrorId := nPendingFault; END_IF
+
+// Hysteresis leaves time for both directions, always inside nonnegative B commands.
+IF (stStatus.nOwner = 1) AND (stStatus.fCommandPosition >= 500000.0)
+    AND (stStatus.fActualPosition >= 480000.0) AND stStatus.bFeedbackValidB AND bPairOK THEN
+    stStatus.nOwner := 3;
+ELSIF (stStatus.nOwner = 2) AND (stStatus.fCommandPosition <= 530000.0)
+    AND (stStatus.fActualPosition <= 540000.0) AND stStatus.bFeedbackValidA AND bPairOK THEN
+    stStatus.nOwner := 3;
+END_IF
+IF stStatus.nOwner = 3 THEN
+    IF (stStatus.fCommandPosition >= 540000.0) AND (stStatus.fActualPosition >= 530000.0)
+        AND stStatus.bFeedbackValidB THEN stStatus.nOwner := 2;
+    ELSIF (stStatus.fCommandPosition <= 490000.0) AND (stStatus.fActualPosition <= 500000.0)
+        AND stStatus.bFeedbackValidA THEN stStatus.nOwner := 1;
+    END_IF
+END_IF
+bUseA := (stStatus.nOwner = 1) OR (stStatus.nOwner = 3);
+bUseB := (stStatus.nOwner = 2) OR (stStatus.nOwner = 3);
+IF (bUseA AND (nStateA <> 8)) OR (bUseB AND (nStateB <> 8)) THEN stStatus.nErrorId := 3001; END_IF
+IF (bUseA AND NOT stStatus.bFeedbackValidA) OR (bUseB AND NOT stStatus.bFeedbackValidB) THEN stStatus.nErrorId := 3002; END_IF
+IF NOT bFeedback OR NOT bPairOK THEN stStatus.nErrorId := 3003; END_IF
+fLocalB := stStatus.fCommandPosition - 480000.0;
+IF bUseA AND NOT ((stStatus.fCommandPosition >= 0.0) AND (stStatus.fCommandPosition < 560000.0)) THEN stStatus.nErrorId := 3004; END_IF
+IF bUseB AND NOT ((fLocalB >= 0.0) AND (fLocalB <= 560000.0)) THEN stStatus.nErrorId := 3005; END_IF
+IF ABS(stStatus.fActualPosition - stStatus.fCommandPosition) > stConfig.fFollowingLimit THEN
+    nFollowing := MIN(nFollowing + 1, stConfig.nFollowingCycles);
+ELSE nFollowing := 0;
+END_IF
+IF nFollowing >= stConfig.nFollowingCycles THEN stStatus.nErrorId := 3006; END_IF
+stStatus.bFault := stStatus.nErrorId <> 0;
+IF stStatus.bFault THEN
+    stCommand.bPower := FALSE; stCommand.bAuto := FALSE;
+    stStatus.bBusy := FALSE;
+    bInitialized := FALSE;
+    RETURN;
+END_IF
+
+// No extra 480000 encoding offset; no +80000 in the center command.
+// Inactive position fields remain exactly zero (including all unused slots).
+aRxA[1] := stConfig.stA.dwMetadata1 AND stConfig.stA.dwMetadataMask1;
+aRxA[2] := stConfig.stA.dwMetadata2 AND stConfig.stA.dwMetadataMask2;
+aRxB[1] := stConfig.stB.dwMetadata1 AND stConfig.stB.dwMetadataMask1;
+aRxB[2] := stConfig.stB.dwMetadata2 AND stConfig.stB.dwMetadataMask2;
+IF bUseA THEN aRxA[nIndexA] := SHL(LREAL_TO_DWORD(stStatus.fCommandPosition), 4) OR stConfig.stA.dwActiveControl; END_IF
+IF bUseB THEN aRxB[nIndexB] := SHL(LREAL_TO_DWORD(fLocalB), 4) OR stConfig.stB.dwActiveControl; END_IF
+stStatus.bParticipatingA := bUseA;
+stStatus.bParticipatingB := bUseB;
+stStatus.bPowered := TRUE;
+stStatus.bReady := NOT fbTrajectory.bBusy;
+stStatus.bAtA := (ABS(stStatus.fActualPosition - stConfig.fStationA) <= stConfig.fPositionTolerance)
+    AND NOT fbTrajectory.bBusy AND (ABS(stStatus.fActualVelocity) <= 5000.0);
+stStatus.bAtB := (ABS(stStatus.fActualPosition - stConfig.fStationB) <= stConfig.fPositionTolerance)
+    AND NOT fbTrajectory.bBusy AND (ABS(stStatus.fActualVelocity) <= 5000.0);
+]]></ST>
+    </Implementation>
+    <LineIds Name="FB_ABDirect">
+      <LineId Id="3" Count="259" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

@@ -10,6 +10,7 @@ VAR_INPUT
     nStateB : UINT;
     bPermit : BOOL;
     bEmergency : BOOL;
+    bTaskCycleOK : BOOL; // Caller verified the ACTUAL task cycle is 1 ms.
 END_VAR
 VAR_IN_OUT
     stCommand : ST_ABCommand;
@@ -92,7 +93,7 @@ bConfigOK := stConfig.stA.bConfirmed AND stConfig.stB.bConfirmed
     AND (stConfig.stA.dwFaultMask <> 0) AND (stConfig.stB.dwFaultMask <> 0)
     AND (stConfig.stA.dwActiveControl = 1) AND (stConfig.stB.dwActiveControl = 1)
     AND (stConfig.stA.dwInactiveControl = 0) AND (stConfig.stB.dwInactiveControl = 0)
-    AND (stConfig.fCycleTime = 0.001)
+    AND (stConfig.fCycleTime = 0.001) AND bTaskCycleOK
     AND (stConfig.fStationA >= 0.0) AND (stConfig.fStationA < 400000.0)
     AND (stConfig.fStationB > 560000.0) AND (stConfig.fStationB <= 960000.0)
     AND (stConfig.fVelocity > 0.0) AND (stConfig.fVelocity <= 1000000.0)
@@ -100,11 +101,14 @@ bConfigOK := stConfig.stA.bConfirmed AND stConfig.stB.bConfirmed
     AND (stConfig.fDeceleration > 0.0) AND (stConfig.fDeceleration <= 100000000.0)
     AND (stConfig.fPositionTolerance > 0.0) AND (stConfig.fPositionTolerance <= 5000.0)
     AND (stConfig.fCompareTolerance > 0.0) AND (stConfig.fCompareTolerance <= 5000.0)
-    AND (stConfig.fFollowingLimit > 0.0) AND (stConfig.fFollowingLimit <= 20000.0)
+    // B->A handover needs lag <= 20000 (owner 3->1 at actual <= 500000 before B's
+    // local 0 = 480000); 10000 keeps the same margin as A->B.
+    AND (stConfig.fFollowingLimit > 0.0) AND (stConfig.fFollowingLimit <= 10000.0)
     AND (stConfig.nFollowingCycles > 0) AND (stConfig.nFollowingCycles <= 1000)
     AND (stConfig.nSettleCycles > 0) AND (stConfig.nSettleCycles <= 10000)
     AND (stConfig.nDwellCycles <= 600000);
 stStatus.bConfigured := bConfigOK;
+stStatus.bTaskCycleOK := bTaskCycleOK;
 stStatus.bFeedbackValidA := bConfigOK AND (nStateA = 8)
     AND ((dwA AND stConfig.stA.dwPresentMask) = stConfig.stA.dwPresentValue)
     AND ((dwA AND stConfig.stA.dwFaultMask) = 0)
@@ -147,12 +151,18 @@ IF stCommand.bReset AND NOT stCommand.bPower THEN
     stCommand.bAuto := FALSE;
 END_IF
 stCommand.bReset := FALSE;
-IF bInitialized AND bEmergency THEN stStatus.nErrorId := 1001; END_IF
-IF bInitialized AND NOT bConfigOK THEN stStatus.nErrorId := 1002; END_IF
-IF bInitialized AND (MEMCMP(ADR(stConfig), ADR(stLatchedConfig), SIZEOF(stConfig)) <> 0) THEN stStatus.nErrorId := 1006; END_IF
-IF bInitialized AND NOT bPairOK THEN stStatus.nErrorId := 1003; END_IF
-IF bInitialized AND NOT bPermit THEN stStatus.nErrorId := 1004; END_IF
-IF bInitialized AND (stCommand.nMoverId <> stStatus.nMoverId) THEN stStatus.nErrorId := 1005; END_IF
+// First cause wins. An emergency also drops bPermit, and an invalid config while
+// initialized always differs from the latched one, so later checks must not
+// overwrite the root cause (previously 1001 and 1002 could never be reported).
+IF bInitialized AND (stStatus.nErrorId = 0) THEN
+    IF bEmergency THEN stStatus.nErrorId := 1001;
+    ELSIF NOT bPermit THEN stStatus.nErrorId := 1004;
+    ELSIF NOT bConfigOK THEN stStatus.nErrorId := 1002;
+    ELSIF MEMCMP(ADR(stConfig), ADR(stLatchedConfig), SIZEOF(stConfig)) <> 0 THEN stStatus.nErrorId := 1006;
+    ELSIF NOT bPairOK THEN stStatus.nErrorId := 1003;
+    ELSIF stCommand.nMoverId <> stStatus.nMoverId THEN stStatus.nErrorId := 1005;
+    END_IF
+END_IF
 stStatus.bFault := stStatus.nErrorId <> 0;
 
 IF NOT bConfigOK THEN
@@ -170,6 +180,7 @@ IF NOT bConfigOK OR NOT bPermit OR bEmergency OR stStatus.bFault OR NOT stComman
     stStatus.nOwner := 0;
     stStatus.bBusy := FALSE;
     nDwell := 0; nSettled := 0; nFollowing := 0; nPendingFault := 0;
+    IF stCommand.bMove THEN stStatus.bMoveRejected := TRUE; END_IF
     stCommand.bMove := FALSE; stCommand.bStop := FALSE;
     IF stStatus.bFault THEN stCommand.bPower := FALSE; stCommand.bAuto := FALSE; END_IF
     IF bFeedback THEN stStatus.fCommandPosition := stStatus.fActualPosition; END_IF
@@ -196,6 +207,7 @@ IF NOT bInitialized THEN
     bInitialized := TRUE;
     bResetTrajectory := TRUE;
     nDwell := 0; nSettled := 0;
+    IF stCommand.bMove THEN stStatus.bMoveRejected := TRUE; END_IF
     stCommand.bMove := FALSE; // Re-arm from actual position before accepting motion.
 END_IF
 fSeed := stStatus.fCommandPosition;
@@ -211,8 +223,13 @@ IF NOT fbTrajectory.bBusy AND NOT bResetTrajectory AND NOT bStop THEN
     ELSE nSettled := 0; nDwell := 0;
     END_IF
     IF stCommand.bMove THEN
-        fTarget := stCommand.fTarget;
-        bExecute := TRUE;
+        // An out-of-range manual target is rejected, not latched as fault 2003 with Power off.
+        // Negated range check also rejects NaN.
+        stStatus.bMoveRejected := NOT ((stCommand.fTarget >= 0.0) AND (stCommand.fTarget <= 960000.0));
+        IF NOT stStatus.bMoveRejected THEN
+            fTarget := stCommand.fTarget;
+            bExecute := TRUE;
+        END_IF
     ELSIF stCommand.bAuto AND (nSettled >= stConfig.nSettleCycles) THEN
         nDwell := MIN(nDwell + 1, stConfig.nDwellCycles + 1);
         IF nDwell > stConfig.nDwellCycles THEN
@@ -224,7 +241,10 @@ IF NOT fbTrajectory.bBusy AND NOT bResetTrajectory AND NOT bStop THEN
         END_IF
     ELSE nDwell := 0;
     END_IF
-ELSE nSettled := 0; nDwell := 0;
+ELSE
+    nSettled := 0; nDwell := 0;
+    // Busy, re-seeding or stopping: a Move is consumed here, so report it instead of dropping it.
+    IF stCommand.bMove THEN stStatus.bMoveRejected := TRUE; END_IF
 END_IF
 stCommand.bMove := FALSE;
 IF bExecute THEN
@@ -259,8 +279,8 @@ fbTrajectory(bReset := bResetTrajectory, bExecute := bExecute, bStop := bStop,
 stStatus.fCommandPosition := fbTrajectory.fPosition;
 stStatus.fCommandVelocity := fbTrajectory.fVelocity;
 stStatus.bBusy := fbTrajectory.bBusy;
-IF fbTrajectory.bError THEN stStatus.nErrorId := 2004; END_IF
-IF (nPendingFault <> 0) AND NOT fbTrajectory.bBusy THEN stStatus.nErrorId := nPendingFault; END_IF
+IF (stStatus.nErrorId = 0) AND fbTrajectory.bError THEN stStatus.nErrorId := 2004; END_IF
+IF (stStatus.nErrorId = 0) AND (nPendingFault <> 0) AND NOT fbTrajectory.bBusy THEN stStatus.nErrorId := nPendingFault; END_IF
 
 // Hysteresis leaves time for both directions, always inside nonnegative B commands.
 IF (stStatus.nOwner = 1) AND (stStatus.fCommandPosition >= 500000.0)
@@ -279,17 +299,18 @@ IF stStatus.nOwner = 3 THEN
 END_IF
 bUseA := (stStatus.nOwner = 1) OR (stStatus.nOwner = 3);
 bUseB := (stStatus.nOwner = 2) OR (stStatus.nOwner = 3);
-IF (bUseA AND (nStateA <> 8)) OR (bUseB AND (nStateB <> 8)) THEN stStatus.nErrorId := 3001; END_IF
-IF (bUseA AND NOT stStatus.bFeedbackValidA) OR (bUseB AND NOT stStatus.bFeedbackValidB) THEN stStatus.nErrorId := 3002; END_IF
-IF NOT bFeedback OR NOT bPairOK THEN stStatus.nErrorId := 3003; END_IF
+// First cause wins: 3001 (not OP) implies 3002/3003, so it must not be overwritten.
+IF (stStatus.nErrorId = 0) AND ((bUseA AND (nStateA <> 8)) OR (bUseB AND (nStateB <> 8))) THEN stStatus.nErrorId := 3001; END_IF
+IF (stStatus.nErrorId = 0) AND ((bUseA AND NOT stStatus.bFeedbackValidA) OR (bUseB AND NOT stStatus.bFeedbackValidB)) THEN stStatus.nErrorId := 3002; END_IF
+IF (stStatus.nErrorId = 0) AND (NOT bFeedback OR NOT bPairOK) THEN stStatus.nErrorId := 3003; END_IF
 fLocalB := stStatus.fCommandPosition - 480000.0;
-IF bUseA AND NOT ((stStatus.fCommandPosition >= 0.0) AND (stStatus.fCommandPosition < 560000.0)) THEN stStatus.nErrorId := 3004; END_IF
-IF bUseB AND NOT ((fLocalB >= 0.0) AND (fLocalB <= 560000.0)) THEN stStatus.nErrorId := 3005; END_IF
+IF (stStatus.nErrorId = 0) AND bUseA AND NOT ((stStatus.fCommandPosition >= 0.0) AND (stStatus.fCommandPosition < 560000.0)) THEN stStatus.nErrorId := 3004; END_IF
+IF (stStatus.nErrorId = 0) AND bUseB AND NOT ((fLocalB >= 0.0) AND (fLocalB <= 560000.0)) THEN stStatus.nErrorId := 3005; END_IF
 IF ABS(stStatus.fActualPosition - stStatus.fCommandPosition) > stConfig.fFollowingLimit THEN
     nFollowing := MIN(nFollowing + 1, stConfig.nFollowingCycles);
 ELSE nFollowing := 0;
 END_IF
-IF nFollowing >= stConfig.nFollowingCycles THEN stStatus.nErrorId := 3006; END_IF
+IF (stStatus.nErrorId = 0) AND (nFollowing >= stConfig.nFollowingCycles) THEN stStatus.nErrorId := 3006; END_IF
 stStatus.bFault := stStatus.nErrorId <> 0;
 IF stStatus.bFault THEN
     stCommand.bPower := FALSE; stCommand.bAuto := FALSE;
@@ -317,7 +338,7 @@ stStatus.bAtB := (ABS(stStatus.fActualPosition - stConfig.fStationB) <= stConfig
 ]]></ST>
     </Implementation>
     <LineIds Name="FB_ABDirect">
-      <LineId Id="3" Count="259" />
+      <LineId Id="3" Count="279" />
       <LineId Id="2" Count="0" />
     </LineIds>
   </POU>

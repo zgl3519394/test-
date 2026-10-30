@@ -30,6 +30,9 @@ STRUCT
     fCommandVelocity : LREAL;
     dwStatusA : DWORD;
     dwStatusB : DWORD;
+    // Appended so existing member offsets are unchanged for offset-based HMI access.
+    bMoveRejected : BOOL; // Result of the last Move request, retained until the next request.
+    bTaskCycleOK : BOOL; // Actual task cycle is 1 ms; FALSE also inhibits via bConfigured.
 END_STRUCT
 END_TYPE
 ]]></Declaration>

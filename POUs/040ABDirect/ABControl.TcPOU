@@ -16,6 +16,8 @@ VAR
     bResetRejected : BOOL; // Result of the last reset request, retained until the next request.
     bPermit : BOOL;
     bEstop : BOOL;
+    nTaskIndex : BYTE;
+    bTaskCycleOK : BOOL;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -26,6 +28,11 @@ bResetRequest := ABDirect.stCommand.bReset;
 bPowerRequest := ABDirect.stCommand.bPower;
 fbStartup(IN := TRUE, PT := T#10S);
 ABDirect.bStartupReady := fbStartup.Q;
+
+// The core hard-codes 1 ms (trajectory step, velocity, cycle counters). Verify the
+// task this program actually runs in, not only stConfig.fCycleTime. Unit: 100 ns.
+nTaskIndex := GETCURTASKINDEXEX();
+bTaskCycleOK := _TaskInfo[nTaskIndex].CycleTime = 10000;
 
 // The hardware emergency input is healthy HIGH. Once tripped, input recovery
 // alone cannot release the latch or restore the motion permit.
@@ -71,7 +78,7 @@ bPermit := fbStartup.Q AND NOT bEstop;
 fbDirect(stConfig := ABDirect.stConfig, stCommand := ABDirect.stCommand,
     nStateA := ABDirect.nStateA, nStateB := ABDirect.nStateB,
     aTxA := ABDirect.aTxA, aTxB := ABDirect.aTxB,
-    bPermit := bPermit, bEmergency := bEstop);
+    bPermit := bPermit, bEmergency := bEstop, bTaskCycleOK := bTaskCycleOK);
 ABDirect.aRxA := fbDirect.aRxA;
 ABDirect.aRxB := fbDirect.aRxB;
 ABDirect.stStatus := fbDirect.stStatus;
@@ -80,7 +87,7 @@ ABDirect.stStatus.bResetRejected := bResetRejected;
 ]]></ST>
     </Implementation>
     <LineIds Name="ABControl">
-      <LineId Id="3" Count="57" />
+      <LineId Id="3" Count="62" />
       <LineId Id="2" Count="0" />
     </LineIds>
   </POU>
